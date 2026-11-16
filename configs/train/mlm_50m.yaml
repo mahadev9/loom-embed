@@ -6,6 +6,8 @@ data:
   seq_len: 1024
   mask_rate: 0.30
   run_rows: 16 # consecutive rows per disk read (HDD friendly)
+  base_steps: 0 # continue an earlier run's data stream after this many of its steps (0 = fresh)
+  base_tokens_per_step: 0 # that earlier run's batch size in tokens
 
 batch:
   tokens_per_step: 524288 # 512 rows of 1024

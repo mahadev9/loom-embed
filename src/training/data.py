@@ -72,11 +72,17 @@ class CorpusReader:
         rng = np.random.default_rng([self.seed, step, 11])
         return rng.multinomial(rows, self.probs)
 
-    def cursors_at(self, step: int, rows: int) -> np.ndarray:
-        """Total rows consumed per language before `step`. Replays the draws (cheap) on resume."""
-        cursors = np.zeros(len(self.codes), dtype=np.int64)
+    def cursors_at(
+        self, step: int, rows: int, step_offset: int = 0, initial: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Total rows consumed per language before `step`. Replays the draws (cheap) on resume.
+
+        `initial` and `step_offset` continue the stream of an earlier run that used another batch
+        size: `initial` is that run's cursors and its steps were numbered below `step_offset`.
+        """
+        cursors = np.zeros(len(self.codes), dtype=np.int64) if initial is None else initial.copy()
         for s in range(step):
-            cursors += self.counts_for_step(s, rows)
+            cursors += self.counts_for_step(step_offset + s, rows)
         return cursors
 
     def _take_rows(self, code: str, start: int, n: int) -> np.ndarray:
@@ -109,10 +115,17 @@ class CorpusReader:
         order = np.random.default_rng([self.seed, step, 13]).permutation(rows)
         return batch[order]
 
-    def iter_batches(self, start_step: int, total_steps: int, rows: int) -> Iterator[torch.Tensor]:
-        cursors = self.cursors_at(start_step, rows)
+    def iter_batches(
+        self,
+        start_step: int,
+        total_steps: int,
+        rows: int,
+        step_offset: int = 0,
+        initial: np.ndarray | None = None,
+    ) -> Iterator[torch.Tensor]:
+        cursors = self.cursors_at(start_step, rows, step_offset, initial)
         for step in range(start_step, total_steps):
-            yield torch.from_numpy(self.step_rows(step, rows, cursors))
+            yield torch.from_numpy(self.step_rows(step_offset + step, rows, cursors))
 
     # ------------------------------------------------------------------ validation rows
 

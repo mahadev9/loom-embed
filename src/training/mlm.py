@@ -158,6 +158,14 @@ def main() -> None:
     reader = CorpusReader(
         cfg["data"]["snapshot"], seq_len, cfg["data"]["run_rows"], seed=cfg["seed"]
     )
+    # A run that continues an earlier run's data stream with another batch size (a branch from a
+    # checkpoint trained at base_tokens_per_step) starts its cursors where that run stopped and
+    # numbers its steps from base_steps, so no draw or mask seed is reused.
+    base_steps = cfg["data"].get("base_steps", 0)
+    base_cursors = None
+    if base_steps:
+        base_rows = cfg["data"]["base_tokens_per_step"] // seq_len
+        base_cursors = reader.cursors_at(base_steps, base_rows)
     start_step = 0
     latest = run_dir / "latest.pt"
     if latest.exists():
@@ -184,7 +192,7 @@ def main() -> None:
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
-    loader = Prefetcher(reader.iter_batches(start_step, total_steps, rows_per_step))
+    loader = Prefetcher(reader.iter_batches(start_step, total_steps, rows_per_step, base_steps, base_cursors))
     window_loss = torch.zeros((), device=DEVICE)
     window_start = time.time()
     excluded = 0.0  # seconds in eval/checkpoint within the current logging window
@@ -195,7 +203,7 @@ def main() -> None:
         )
         for group in optimizer.param_groups:
             group["lr"] = lr
-        generator = torch.Generator(DEVICE).manual_seed(cfg["seed"] * 1_000_003 + step)
+        generator = torch.Generator(DEVICE).manual_seed(cfg["seed"] * 1_000_003 + base_steps + step)
         loss = run_micro_batches(
             compiled, rows.to(DEVICE, non_blocking=True), cfg, model_cfg, generator, True
         )
