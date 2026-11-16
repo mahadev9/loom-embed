@@ -218,6 +218,35 @@ What it needs before it can start:
   same text lengths (64/256 tokens); the 200M is not measured.
 - **Batch 8k+:** the trainer runs GradCache at batch 512; confirm memory and throughput with a short run.
 
+### 4.3 Release constraints and teacher choice (noted 2026-11-14; revisit after the 40B trunk)
+
+Licensing only binds when we distribute, so local experiments can use any teacher or pair source. The
+released model must be trained from clean sources only. Not legal advice, and the licenses below are from
+memory: check each model or dataset card before relying on them.
+
+- **Data licenses:** FineWeb2-HQ-Plus and FineWeb-Edu are ODC-By (attribution), WebFAQ is CC BY-4.0,
+  WikiMatrix is CC BY-SA. Whether share-alike reaches model weights is unsettled, so **exclude WikiMatrix
+  (and other CC BY-SA sources such as StackExchange) from the release candidate** if we want a permissive
+  license. Parallel-mix runs stay local research results.
+- **MLM base encoder** (ODC-By data only) is the clean first release: Apache 2.0 with attribution in the card.
+- **Distillation needs only unlabeled text plus teacher vectors, no pairs.** Distilling on FineWeb text
+  avoids the pair-license question entirely, which is a point in its favor besides quality.
+- **Teacher licenses:** Qwen3-Embedding 0.6B/4B/8B, Arctic-embed 2.0, gte-multilingual and granite are
+  Apache 2.0; BGE-M3 and multilingual-e5-large-instruct are MIT. All are fine to distill from and release.
+  NV-Embed-v2 and jina-embeddings-v4/v5 are CC BY-NC (local research only). EmbeddingGemma is under the
+  Gemma terms (read the use restrictions). API models (Gemini, OpenAI) usually forbid training competing
+  models. Teacher API terms still bind on a local machine.
+- **Teacher size:** keep Qwen3-Embedding-0.6B as the main teacher. A larger teacher gives a 50M student
+  diminishing returns (large capacity gap) and costs more: the 8B is about 13x the compute of the 0.6B per
+  cached text, and outputs 4096 dims that we would truncate to 384 (the existing M4 gating check).
+- **To do after the 40B trunk (GPU needed, about an hour each):**
+  1. Truncation-quality check at 384 dims for Qwen3-Embedding 0.6B and 4B on our 17-task MMTEB subset.
+  2. If the 4B is clearly better, add it as a test arm in the central experiment (section 4.1). Otherwise
+     keep the 0.6B.
+  3. Measure teacher encoding speed on the 5090 before sizing the corpus to embed.
+- **Release candidate recipe:** MLM trunk, then distillation on ODC-By text (Apache 2.0 teacher) and/or
+  contrastive on WebFAQ, with no WikiMatrix. Record which sources each published checkpoint used in its card.
+
 ### Stage 0: Data and tokenizer
 
 - **Text for MLM:** FineWeb-2 for the non-English languages (ODC-By 1.0), and an English quality source
@@ -606,6 +635,10 @@ same seed and data stream for every run. Trunk A is named `main-lr1.6e-3`, trunk
 | 4b | Branches at 10B, token-matched: plain decay 1B (`decay-10.00B`), and optionally hold 4e-4 for 0.5B + decay 0.5B | 71 min each | plain decay done: 2.465 -> 2.348 at 11.0B (decayed 3B result was 2.612); hold variant done: 2.351, no benefit over plain decay at matched tokens |
 | 5 | Continue the winning trunk from 10B to 20B | 11.8 h | done 2026-11-11: macro val 2.347 at 20B (undecayed), still falling about 0.008 per 1B, max update RMS 2.05 over 10-20B. Paused once at 16.14B and resumed exactly |
 | 5b | Branch at 20B: decay 2B tokens (final 50M model) | 2.4 h | done: macro val 2.244 at 22.0B (`decay-20.00B`, the final 50M model), see 5.14 |
+| 5c | Probe: 1B tokens at 3.2e-3 from the 25B checkpoint (`lr3.2e-3-25B`, a branch) | 1.1 h | done 2026-11-14: stable (max update RMS 1.73) but worse, val macro 2.400 vs 2.316 for the trunk, flat over the 1B tokens; 1.6e-3 stays the trunk rate |
+| 6 | Continue the trunk from 20B to 38B (`main-lr1.6e-3`) | 21 h | done 2026-11-15: macro val 2.260 at 38B (undecayed), about 0.002 per 1B at the end, max update RMS 1.75 |
+| 6b | Branch at 38B: decay 2B tokens (`decay-38.00B`, the final 50M model, 40B tokens) | 2.3 h | done: macro val 2.1798, see 5.15 |
+| 6c | Fork at 38B: same decay with a 2x batch (`decay-38.00B-bs1M`) | 2.3 h | done: 2.1795, a tie with 6b, see 5.15 |
 
 Total about 32.5 h, one job on the GPU at a time. Both trunks are constant-rate runs, so the loser
 simply stops at 3B and the winner continues: nothing is restarted. What this answers: whether the
@@ -793,6 +826,85 @@ languages rose, but single tasks are within noise and the layer 3 probes are fla
 +2.4 macro for a 25-minute fine-tune (5.13), so the lever is the pair stage, not more MLM tokens. This
 supports the proposal in 4.2. Caveats: single seed per run; MLM loss improved 0.10 while downstream moved
 little, so loss alone is a weak guide at this size.
+
+### 5.15 Final 50M model after 40B tokens: results (2026-11-16)
+
+**Model.** `decay-38.00B`: the constant 1.6e-3 trunk to 38B tokens, then a 2B-token 1-sqrt decay to zero, 40B
+tokens in total (one corpus epoch). The trunk resumed exactly after pauses at 16.14B, 25.0B (for the 3.2e-3 side test below) and 36.2B. Checkpoint: `runs/decay-38.00B/latest.pt`.
+
+**Validation loss (macro over 12 languages).**
+
+| Model | Tokens | Loss | Gain from decay |
+|---|---|---|---|
+| decay-10.00B | 11.0B | 2.348 | -0.117 |
+| decay-20.00B | 22.0B | 2.244 | -0.103 |
+| **decay-38.00B** | **40.0B** | **2.1798** | **-0.080** |
+
+The undecayed trunk went 2.347 (20B), 2.314 (25B), 2.303 (27B), 2.286 (31B), 2.260 (38B). All 12 languages
+improved over the 22B model (en 2.12, zh 2.92, es 1.95, fr 1.81, de 1.96, pt 1.98, ru 1.63, ja 2.57, ar 2.52,
+hi 2.10, ko 2.57, it 2.04).
+
+**Two side experiments, both negative.**
+- *Peak rate 3.2e-3* (step 5c): a 1B-token branch from the 25B checkpoint at twice the trunk rate. Stable
+  but 0.085 worse (2.400 vs 2.316) and flat, so 1.6e-3 is the right trunk rate (mid-run jump only; a fresh
+  run at 3.2e-3 was not tried).
+- *Larger batch in the decay* (step 6c, `decay-38.00B-bs1M`): 1,048,576 tokens per step (2x), peak rate
+  scaled by sqrt(2) = 2.263e-3, same 2B-token 1-sqrt decay (1,908 steps). Final 2.1795 vs 2.1798, which is
+  a tie (it led by 0.002-0.006 mid-decay and the gap closed). It also tied on layer 2 and layer 4. So at this
+  size a larger batch buys nothing per token (the reason, for example a critical batch size near 0.5M
+  tokens, was not measured). `decay-38.00B` stays the final model, being simpler. Needed a loader change:
+  `data.base_steps` and `data.base_tokens_per_step` continue an earlier run's data stream at another batch
+  size (the loader replays its draws from step 0 at the current batch size, so without it a branch at a
+  new batch size would restart the second epoch).
+
+**Layer 2** (bits per masked byte, macro): 40B model 1.257 (mask 15%) and 1.425 (30%), against 1.276 and
+1.442 for the 22B model; both 40B models are identical to three decimals.
+
+**Layer 4** (`probe-e`: the probe-d recipe started from the 40B model; WebFAQ validation MRR 0.6724 against
+0.674 for probe-d). 17-task benchmark, task-type means in percent, from `src.eval.compare`:
+
+| | Bitext | Classif. | Cluster | Pair | Retrieval | STS | Macro |
+|---|---|---|---|---|---|---|---|
+| probe-d (22B model) | 56.7 | 60.0 | 40.8 | 56.7 | 48.0 | 63.3 | 54.3 |
+| probe-e (40B model) | 59.8 | 60.9 | 41.2 | 56.2 | 48.8 | 64.3 | **55.2** |
+| probe-f (40B bs1M model) | 59.7 | 60.8 | 41.2 | 56.3 | 48.7 | 64.4 | 55.2 |
+| e5-small (public) | 90.5 | 66.1 | 36.2 | 63.2 | 67.2 | 75.3 | 66.4 |
+
+Doubling the tokens again gave about +0.9 macro (the same as 10B to 22B), mostly bitext mining (+3.1:
+Tatoeba 61.2 to 64.5, NTREX 52.2 to 55.2) and STS (+1.0), with most tasks up (PAWS-X is the one that fell, within noise). The gap to e5-small is
+still 11 points, so the pair stage remains the lever (4.2, 4.3). English is 60.9 against 71.0 for e5-small.
+The per-run means in `eval/mmteb.json` are lower (53.65, 54.61, 54.56) because they average differently
+(I did not check how); the differences between models agree, so read only deltas across the two sources.
+
+**Layer 3 (English fine-tune probes): a recipe problem, now understood.** With the standard recipe (linear
+head on the raw final [CLS] vector, rates 1.5e-4 and 4e-4) the 40B models fine-tuned erratically: some
+runs reached XNLI 71 or PAWS-X 85, others stayed at chance (XNLI 45 to 52, PAWS-X 55 to 60), with the
+loss stuck near ln 3 and no pattern in the rate (extra rates 5e-5 and 1e-4 did no better; a second seed
+repeated the failure). The two 40B models disagreed with each other on XNLI and PAWS-X although they match
+on loss, layer 2 and layer 4. Diagnosis (frozen features on 2,490 XNLI pairs): in every checkpoint,
+including the 22B model that fine-tunes well, one dimension holds about 97% of the final-state energy and
+the cosine between CLS vectors is 0.99+, so the informative remainder is tiny; the 38B checkpoints (trunk
+and decay alike) have a final-state norm of 1.3 against 2.0 at 20B, so that remainder is about 1.5x smaller
+and a default-initialized linear head sits on a plateau until it escapes. [CLS] is no worse than mean
+pooling on frozen features. **Fix:** standardize each dimension of the [CLS] vector before the head
+(`--head-norm` in `src.eval.finetune`, BatchNorm without learned scale, pair tasks only). Results with it
+(test average over languages, best rate by English dev):
+
+| Task | 22B old head | 22B head-norm | 40B old head | 40B head-norm |
+|---|---|---|---|---|
+| XNLI | 66.3 | 66.4 | 46.1 (62.1 with extra rates) | **67.8** |
+| PAWS-X | 80.0 | 82.0 | 72.8 | **80.8** |
+
+All runs now learn (XNLI dev 68.9 and 77.6, PAWS-X dev 86.9 and 93.1 at the two rates), and head-norm does
+not change the reliable 22B model (XNLI dev 75.8 and 77.1 against 75.7 and 77.4). The 40B model is +1.4 on
+XNLI and -1.2 on PAWS-X against the 22B model: a wash, as with the earlier probes. **WikiANN** (token-level,
+not covered by head-norm) is lower for the 40B models, 42.9 against 51.0 for the 22B model at the best
+rate; the cause is not understood and it was not rerun. The `--seed` option was added to the script
+(default 0) for the seed check.
+
+**Consequence for a release.** Anyone fine-tuning the base encoder with a plain linear head on [CLS] can
+hit these plateaus. The base model card should recommend normalizing the [CLS] feature (or a larger head
+rate). Whether the final-layer scale can be fixed in training (for example a different final norm) is open.
 
 ## 6. Datasets
 

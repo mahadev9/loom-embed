@@ -190,16 +190,24 @@ class HFBackbone(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, backbone: nn.Module, num_labels: int, token_level: bool) -> None:
+    def __init__(
+        self, backbone: nn.Module, num_labels: int, token_level: bool, head_norm: bool = False
+    ) -> None:
         super().__init__()
         self.backbone = backbone
         self.token_level = token_level
+        # Per-dimension standardization of the [CLS] vector (for backbones whose final state has
+        # one dominant dimension and a tiny informative remainder).
+        self.norm = nn.BatchNorm1d(backbone.hidden_size, affine=False) if head_norm else None
         self.dropout = nn.Dropout(0.1)
         self.head = nn.Linear(backbone.hidden_size, num_labels)
 
     def forward(self, ids: torch.Tensor, attn: torch.Tensor) -> torch.Tensor:
         hidden = self.backbone(ids, attn)
-        return self.head(self.dropout(hidden if self.token_level else hidden[:, 0]))
+        x = hidden if self.token_level else hidden[:, 0]
+        if self.norm is not None:
+            x = self.norm(x.float())
+        return self.head(self.dropout(x))
 
 
 # ------------------------------------------------------------------------------- batching
@@ -313,9 +321,11 @@ def run_task(spec: str, task: str, lrs: list[float], args) -> dict:
 
     best = None
     for lr in lrs:
-        torch.manual_seed(0)
+        torch.manual_seed(args.seed)
         backbone = OursBackbone(rest) if kind == "ours" else HFBackbone(rest)
-        model = Classifier(backbone, num_labels, task == "ner").to(DEVICE)
+        model = Classifier(
+            backbone, num_labels, task == "ner", args.head_norm and task != "ner"
+        ).to(DEVICE)
         decay = [p for n, p in model.named_parameters() if p.ndim >= 2 and "embed" not in n]
         rest_params = [
             p for n, p in model.named_parameters() if not (p.ndim >= 2 and "embed" not in n)
@@ -332,7 +342,7 @@ def run_task(spec: str, task: str, lrs: list[float], args) -> dict:
             return min((s + 1) / warm, max(0.0, (steps - s) / max(steps - warm, 1)))
 
         sched = torch.optim.lr_scheduler.LambdaLR(opt, schedule)
-        rng = random.Random(0)
+        rng = random.Random(args.seed)
         start, step = time.time(), 0
         for _epoch in range(cfg["epochs"]):
             model.train()
@@ -396,6 +406,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-train", type=int, help="cap English training examples")
     parser.add_argument("--max-test", type=int, help="cap test examples per language")
+    parser.add_argument(
+        "--head-norm", action="store_true", help="standardize [CLS] features (pair tasks only)"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="head init and data order")
     parser.add_argument("--out", default="finetune.json")
     args = parser.parse_args()
 
