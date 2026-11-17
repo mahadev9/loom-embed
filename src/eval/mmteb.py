@@ -165,10 +165,40 @@ class OursEncoder:
         return (a * b).sum(dim=-1)
 
 
+class TruncatedModel:
+    """A public Matryoshka model with its embeddings cut to the first `dim` dimensions and
+    renormalized (what a student matching truncated teacher prefixes would see)."""
+
+    def __init__(self, inner, dim: int) -> None:
+        self.inner, self.dim = inner, dim
+        meta = inner.mteb_model_meta
+        self.mteb_model_meta = meta.model_copy(update={"name": f"{meta.name}@{dim}", "embed_dim": dim})
+
+    def encode(self, inputs, **kwargs):
+        emb = torch.as_tensor(self.inner.encode(inputs, **kwargs))[:, : self.dim].float()
+        return torch.nn.functional.normalize(emb, dim=-1).cpu().numpy()
+
+    def similarity(self, embeddings1, embeddings2):
+        a = torch.nn.functional.normalize(torch.as_tensor(embeddings1), dim=-1)
+        b = torch.nn.functional.normalize(torch.as_tensor(embeddings2), dim=-1)
+        return a @ b.T
+
+    def similarity_pairwise(self, embeddings1, embeddings2):
+        a = torch.nn.functional.normalize(torch.as_tensor(embeddings1), dim=-1)
+        b = torch.nn.functional.normalize(torch.as_tensor(embeddings2), dim=-1)
+        return (a * b).sum(dim=-1)
+
+
 def load_model(spec: str, args):
     if spec.startswith("ours:"):
         return OursEncoder(spec[5:], max_len=args.max_len, dim=args.dim, prefix=args.prefix)
-    return mteb.get_model(spec)
+    model = mteb.get_model(spec)
+    if not args.dim:
+        return model
+    st = getattr(model, "model", None)  # cap the context so long texts do not exhaust memory
+    if st is not None and getattr(st, "max_seq_length", 0) and st.max_seq_length > args.max_len:
+        st.max_seq_length = args.max_len
+    return TruncatedModel(model, args.dim)
 
 
 # ------------------------------------------------------------------------------------ summary
@@ -211,7 +241,7 @@ def main() -> None:
     parser.add_argument("--tasks", nargs="+", default=ALL_TASKS)
     parser.add_argument("--prefetch", action="store_true", help="download task data and exit")
     parser.add_argument("--max-len", type=int, default=512, help="tokens per text (ours)")
-    parser.add_argument("--dim", type=int, help="Matryoshka dimension (ours)")
+    parser.add_argument("--dim", type=int, help="Matryoshka dimension (ours, or truncate a public model)")
     parser.add_argument("--prefix", default="", help="text prefix (ours)")
     parser.add_argument("--batch-size", type=int, default=64, help="baselines' batch size")
     parser.add_argument("--out", default="mmteb.json")
@@ -229,15 +259,16 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     summary = json.loads(out_path.read_text()) if out_path.exists() else {}
     for spec in args.models:
+        key = f"{spec}@{args.dim}" if args.dim and not spec.startswith("ours:") else spec
         model = load_model(spec, args)
         results = mteb.evaluate(
             model, tasks, cache=cache, encode_kwargs={"batch_size": args.batch_size}
         )
-        summary[spec] = summarize(results, tasks)
+        summary[key] = summarize(results, tasks)
         out_path.write_text(json.dumps(summary, indent=1))
-        s = summary[spec]
+        s = summary[key]
         print(
-            f"\n{spec}: macro {s['macro']:.2f}  "
+            f"\n{key}: macro {s['macro']:.2f}  "
             + " ".join(f"{k} {v:.1f}" for k, v in s["per_type"].items())
         )
         del model
