@@ -241,8 +241,13 @@ memory: check each model or dataset card before relying on them.
   cached text, and outputs 4096 dims that we would truncate to 384 (the existing M4 gating check).
 - **To do after the 40B trunk (GPU needed, about an hour each):**
   1. Truncation-quality check at 384 dims for Qwen3-Embedding 0.6B and 4B on our 17-task MMTEB subset.
-  2. If the 4B is clearly better, add it as a test arm in the central experiment (section 4.1). Otherwise
-     keep the 0.6B.
+     **Done 2026-11-16** (`mmteb --dim 384`, context capped at 512, batch 16). Macro: 0.6B 73.7, 4B 77.3
+     (e5-small-v2 66.4, our 40B student 55.2). 4B leads in every category (bitext 96.8 vs 93.9, classification
+     79.1 vs 75.2, clustering 52.3 vs 50.4, pair 77.7 vs 72.3, retrieval 72.2 vs 68.5, STS 85.5 vs 81.8).
+     Truncation to 384 costs little. Wall time for the subset: 1 h 13 min (0.6B), 4 h 26 min (4B), mostly
+     retrieval corpora, so not a measure of speed on short text.
+  2. The 4B is clearly better, so add it as a test arm in the central experiment (section 4.1); the 0.6B
+     stays the default and the cheap arm.
   3. Measure teacher encoding speed on the 5090 before sizing the corpus to embed.
 - **Release candidate recipe:** MLM trunk, then distillation on ODC-By text (Apache 2.0 teacher) and/or
   contrastive on WebFAQ, with no WikiMatrix. Record which sources each published checkpoint used in its card.
