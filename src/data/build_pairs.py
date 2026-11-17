@@ -2,6 +2,7 @@
 
     python -m src.data.build_pairs --per-language 100000          # WebFAQ, our 12 languages
     python -m src.data.build_pairs --per-language 2000 --langs de --out-name smoke
+    python -m src.data.build_pairs --local --langs de --out-name webfaq_full   # whole local files
 
 Source: PaDaS-Lab/webfaq (CC BY-4.0), FAQ question/answer pairs from web pages. The files are huge
 (English alone is 27 GB) and sorted by website, so this streams random byte ranges of each language
@@ -84,6 +85,59 @@ def sample_language(code: str, target: int, max_per_origin: int, seed: int, work
     return rows[:target]
 
 
+def build_local(code: str, out, max_per_origin: int, per_language: int | None) -> int:
+    """Stream the whole downloaded jsonl for one language (files are sorted by website, so the
+    per-website cap needs only a running counter). Drops short texts, answers equal to the question
+    and duplicate questions (case-insensitive); writes parquet in 100k-row groups."""
+    import hashlib
+
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(
+        "PaDaS-Lab/webfaq", f"data/{WEBFAQ[code]}.jsonl", repo_type="dataset", local_files_only=True
+    )
+    schema = pa.schema(
+        [("query", pa.string()), ("positive", pa.string()), ("lang", pa.string()),
+         ("origin", pa.string())]
+    )  # fmt: skip
+    seen: set[int] = set()
+    cur_origin, cur_count, kept, read = None, 0, 0, 0
+    buf: list[tuple] = []
+    with pq.ParquetWriter(out, schema) as writer, open(path, encoding="utf-8") as f:
+
+        def flush():
+            if buf:
+                writer.write_table(pa.table(dict(zip(schema.names, zip(*buf, strict=True))), schema))
+                buf.clear()
+
+        for line in f:
+            read += 1
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            q, a, origin = r["question"].strip(), r["answer"].strip(), r["origin"]
+            if origin != cur_origin:
+                cur_origin, cur_count = origin, 0
+            if len(q) < 8 or len(a) < 20 or a == q or cur_count >= max_per_origin:
+                continue
+            key = int.from_bytes(hashlib.blake2b(q.lower().encode(), digest_size=8).digest(), "big")
+            if key in seen:
+                continue
+            seen.add(key)
+            cur_count += 1
+            buf.append((q, a[:2000], code, origin))
+            kept += 1
+            if len(buf) >= 100_000:
+                flush()
+                print(f"  {code}: read {read:,} kept {kept:,}", flush=True)
+            if per_language and kept >= per_language:
+                break
+        flush()
+    print(f"{code}: read {read:,} kept {kept:,} -> {out}", flush=True)
+    return kept
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
@@ -93,6 +147,7 @@ def main() -> None:
     parser.add_argument("--max-per-origin", type=int, default=20)
     parser.add_argument("--out-name", default="webfaq")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--local", action="store_true", help="stream the full downloaded files")
     args = parser.parse_args()
 
     out_dir = PAIRS_DIR / args.out_name
@@ -101,6 +156,9 @@ def main() -> None:
         out = out_dir / f"{code}.parquet"
         if out.exists():
             print(f"{code}: exists, skipping")
+            continue
+        if args.local:
+            build_local(code, out, args.max_per_origin, None)
             continue
         rows = sample_language(code, args.per_language, args.max_per_origin, args.seed)
         table = pa.table(
