@@ -1,0 +1,35 @@
+# Distillation of a cached teacher embedding into the 50M model (no pairs, no negatives).
+model: 50m
+init_from: decay-38.00B/latest.pt # RUN/FILE under RUNS_DIR; its encoder weights initialize the model
+
+data:
+  corpus: distill_3M # <RAW_DIR>/distill/<corpus>/*.parquet (src.data.build_distill_corpus)
+  teacher: q06b # <corpus>/<teacher>/<lang>.npy (src.data.embed_teacher)
+  val_texts: 4000 # held out at random from the corpus
+  max_len: 256 # student tokens per text
+  width: 1024 # packing row width in tokens
+
+batch:
+  texts: 512
+  chunk_texts: 128 # texts per forward/backward pass (gradient accumulation)
+
+loss:
+  sim_weight: 0.0 # weight of the in-chunk similarity-matrix MSE (0 = cosine loss only)
+
+optim:
+  lr: 1.0e-4
+  betas: [0.9, 0.98]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+schedule:
+  total_texts: 6.0e6 # about 11.7k steps; the corpus is 3M texts, so two epochs
+  warmup_fraction: 0.05
+
+eval:
+  every_steps: 500
+checkpoint:
+  every_steps: 500
+
+log_every_steps: 10
+seed: 0

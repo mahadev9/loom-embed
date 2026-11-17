@@ -918,6 +918,66 @@ rate; the cause is not understood and it was not rerun. The `--seed` option was 
 hit these plateaus. The base model card should recommend normalizing the [CLS] feature (or a larger head
 rate). Whether the final-layer scale can be fixed in training (for example a different final norm) is open.
 
+### 5.16 Pair stage and distillation on the 40B model (50M, 2026-11-16/17)
+
+Question (plan 4.1): what does each way of using pairs and a teacher add on top of `decay-38.00B`? All runs start
+from that checkpoint, use CLS pooling and Matryoshka 384/256/128/64, and are scored with the same 17-task MMTEB
+subset (compare-script macro; e5-small 66.4, Qwen3-Embedding-0.6B truncated to 384 dims 73.7, 4B 77.3).
+
+| Arm | Data | Cost | Macro | Bitext | Class. | Clust. | Pair | Retr. | STS |
+|---|---|---|---|---|---|---|---|---|---|
+| probe-e: contrastive | 1M WebFAQ pairs | 25 min | 55.2 | 59.8 | 60.9 | 41.2 | 56.2 | 48.8 | 64.3 |
+| `contrastive-only-38B` | 5.6M pairs (12.64M corpus, language-uniform) | 1 h 50 min | 56.3 | 64.9 | 62.0 | 40.0 | 56.0 | 50.9 | 64.0 |
+| `distill-06b-38B`: distillation only | 6M texts (2 epochs of a 3M-text mix), teacher 0.6B @384 | 1 h 10 min | 54.5 | 72.5 | 58.7 | 38.0 | 57.8 | 35.4 | 64.8 |
+| `distill-then-contrastive` | distilled model, then 1M pairs | 25 min | 56.1 | 66.7 | 60.8 | 38.8 | 56.8 | 48.7 | 64.7 |
+
+**Findings.**
+- **Pair data saturates.** 5.6x more pairs (and 5.6x the steps) gave +1.1 macro. The gains are bitext (+5.1) and
+  retrieval (+2.1); STS, pair classification and clustering did not move. WebFAQ question/answer pairs teach
+  question-to-answer matching, which transfers little to the other task types.
+- **Distillation alone is worse than contrastive** (54.5 vs 55.2) but different: best bitext (72.5, +12.7 over probe-e),
+  best STS and pair classification, much worse retrieval (35.4, -13.4). Held-out cosine to the teacher plateaus at
+  0.718 at 384 dims (0.826 at 64 dims) with the learning rate decayed to zero.
+- **Distillation then contrastive** adds +0.9 over probe-e at equal pair cost, matching the 5.6M-pair arm at a fifth of
+  its pair training. The gain is almost all bitext (+6.9); STS +0.4, pair +0.6, retrieval 0, clustering -2.4.
+  The two stages' gains overlap instead of adding.
+- **No recipe passes 56 on the 50M model.** The 10-point gap to e5-small (about 1B training pairs, 21M non-embedding
+  parameters) is therefore not a recipe gap; data scale and model capacity are the likelier causes. The 200M model is
+  the next lever.
+
+**Pipeline built.**
+- `src.data.build_pairs --local`: streams the full downloaded WebFAQ files (53.6 GB), cap 100 pairs per website, drops
+  duplicate questions (about half of all rows). 12.65M pairs: en 7.28M, de 1.22M, fr 0.85M, es 0.84M, ru 0.74M,
+  ja 0.54M, it 0.34M, pt 0.30M, ar 0.17M, zh 0.17M, hi 0.11M, ko 0.09M.
+- `src.data.decontaminate`: exact normalized match against all strings of at least 20 characters in the 17 tasks
+  dropped 7,560 pairs (6,470 Russian) -> `pairs/webfaq_clean`. Paraphrases are not caught.
+- `src.data.build_distill_corpus`: 2.99M texts, 249k per language: 150k FineWeb passages decoded from the tokenized
+  shards (log-uniform 24-256 tokens), plus 50k WebFAQ question/answer pairs sharing a pair id. FineWeb passages are
+  not decontaminated (distillation uses no labels).
+- `src.data.embed_teacher`: Qwen3-Embedding-0.6B, bf16, 256 teacher tokens, cached as fp16 768-dim normalized vectors
+  (4.6 GB). About 600-870 texts/s. All texts are embedded as documents, without the query instruction.
+- `src.training.distill`: cosine loss summed over the four Matryoshka dims against re-normalized teacher prefixes,
+  512 texts per step in chunks of 128, lr 1e-4, 5% warmup, linear decay. About 175k tokens/s. An optional in-chunk
+  similarity-matrix loss (`loss.sim_weight`) exists but was not used.
+
+**Pitfalls.**
+- Japanese WebFAQ is partly casino/pachinko spam with unrelated question and answer (the first 1,000 rows, which the
+  probe uses as validation, are all spam), so its validation MRR is about 0.06 and not meaningful. Most of the file is
+  genuine FAQ. A teacher filter (drop pairs where teacher cosine of question and answer is low) is possible because
+  the distillation corpus stores pair ids; not done.
+- Random 1-document reads on the HDD cost 13 ms each; the corpus sampler takes 16 documents from each 1 MB window.
+- Saving embedding parts synchronously to a busy HDD left the GPU idle (14 MB/min); parts are now written on a
+  background thread, atomically.
+
+**Untested options.** Query-instruction prefixes for the teacher and student (likely helps retrieval); the 4B teacher
+(3.6 points better than the 0.6B at 384 dims, 5x slower to embed: about 6.5 h for 3M texts); the similarity-matrix
+loss; filtering spam pairs; mixing the distillation and contrastive losses in one stage.
+
+**Decision.** The 50M recipe is settled at roughly "MLM trunk, distill, short contrastive" for about 56 macro. Next:
+size and train the 200M model; revisit the 4B teacher and prefixes there.
+
+---
+
 ## 6. Datasets
 
 | Purpose | Dataset | License / note |
