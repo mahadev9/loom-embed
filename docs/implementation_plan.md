@@ -248,7 +248,14 @@ memory: check each model or dataset card before relying on them.
      retrieval corpora, so not a measure of speed on short text.
   2. The 4B is clearly better, so add it as a test arm in the central experiment (section 4.1); the 0.6B
      stays the default and the cheap arm.
-  3. Measure teacher encoding speed on the 5090 before sizing the corpus to embed.
+  3. Teacher encoding speed on the 5090 (bf16, WebFAQ answers, mean 110 tokens, sorted batches of 128):
+     0.6B 600-870 texts/s (66-84k tokens/s), 4B 117-160 texts/s (13-16k tokens/s); about 4 h and 20 h per
+     1B tokens. Plan to embed about 3M texts (330M tokens) per teacher for the central experiment.
+  4. Pair corpus built 2026-11-16 from the full WebFAQ files (`build_pairs --local`, cap 100 pairs per
+     website, duplicate questions removed): 12.65M pairs (en 7.28M, de 1.22M, fr 0.85M, es 0.84M, ru 0.74M,
+     ja 0.54M, it 0.34M, pt 0.30M, ar 0.17M, zh 0.17M, hi 0.11M, ko 0.09M), far below the 100M target.
+     `decontaminate` (exact normalized match against the 17 eval tasks) dropped 7,560 pairs (6,470 of them
+     Russian) -> `pairs/webfaq_clean`. Language mix is heavily English; sample per language when training.
 - **Release candidate recipe:** MLM trunk, then distillation on ODC-By text (Apache 2.0 teacher) and/or
   contrastive on WebFAQ, with no WikiMatrix. Record which sources each published checkpoint used in its card.
 
